@@ -1,5 +1,6 @@
 package com.twevids.valkeryne.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,7 +13,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -47,14 +51,14 @@ fun ChatMessageBubble(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     if (message.imageBitmap != null) {
-                        androidx.compose.foundation.Image(
-                            bitmap = androidx.compose.ui.graphics.asImageBitmap(message.imageBitmap),
+                        Image(
+                            bitmap = message.imageBitmap.asImageBitmap(),
                             contentDescription = "Captured Image",
-                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(max = 180.dp)
-                                .androidx.compose.ui.draw.clip(RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .padding(bottom = if (message.text.isNotEmpty()) 8.dp else 0.dp)
                         )
                     }
