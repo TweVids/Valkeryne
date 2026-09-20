@@ -1,15 +1,17 @@
 {
   "expo": {
-    "name": "Sonata",
-    "slug": "Sonata",
+    "name": "Valkeryne",
+    "slug": "valkeryne",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.twevids.valkeryne"
     },
     "android": {
+      "package": "com.twevids.valkeryne",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
