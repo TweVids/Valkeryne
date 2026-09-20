@@ -13,6 +13,7 @@ import com.twevids.valkeryne.model.MessageSender
 import com.twevids.valkeryne.network.GeminiLiveClient
 import com.twevids.valkeryne.network.GeminiLiveListener
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -85,6 +86,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
         _isFrontCamera.value = !_isFrontCamera.value
     }
 
+    private var pendingFrameJob: Job? = null
+    @Volatile
+    private var capturedFrameBytes: ByteArray? = null
+
     fun onHoldToSpeechStart(currentFrame: Bitmap?) {
         if (_settings.value.apiKey.isEmpty()) {
             openSettings()
@@ -93,6 +98,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
 
         audioPlayer.stop()
         _isHoldingToSpeak.value = true
+        capturedFrameBytes = null
 
         val aiMessageId = "ai_${System.currentTimeMillis()}"
 
@@ -100,13 +106,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
         geminiClient.startVoiceTurn(aiMessageId)
         audioRecorder?.start()
 
-        // 2. If camera is active, compress & send current frame concurrently on background thread
+        // 2. If camera is active, compress current frame concurrently on background thread
         if (_isCameraEnabled.value && currentFrame != null) {
-            viewModelScope.launch(Dispatchers.Default) {
-                val imageBytes = compressBitmap(currentFrame)
-                if (imageBytes != null) {
-                    geminiClient.sendRealtimeImage(imageBytes)
-                }
+            pendingFrameJob = viewModelScope.launch(Dispatchers.Default) {
+                capturedFrameBytes = compressBitmap(currentFrame)
+                android.util.Log.d("ChatViewModel", "Captured camera frame compressed: ${capturedFrameBytes?.size} bytes")
             }
         }
     }
@@ -115,7 +119,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
         if (!_isHoldingToSpeak.value) return
         _isHoldingToSpeak.value = false
         audioRecorder?.stop()
-        geminiClient.finishVoiceTurn()
+
+        viewModelScope.launch {
+            try {
+                pendingFrameJob?.join()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            val frame = capturedFrameBytes
+            capturedFrameBytes = null
+            pendingFrameJob = null
+            geminiClient.finishVoiceTurn(frame)
+        }
     }
 
     private fun compressBitmap(bitmap: Bitmap): ByteArray? {

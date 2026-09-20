@@ -290,38 +290,50 @@ class GeminiLiveClient(
         }
     }
 
-    fun finishVoiceTurn() {
+    fun finishVoiceTurn(imageBytes: ByteArray? = null) {
         if (!isConnected || !isSetupComplete || webSocket == null) {
-            Log.d(TAG, "finishVoiceTurn requested before setupComplete. Marking pending.")
+            Log.d(TAG, "finishVoiceTurn requested before setupComplete. Marking pending (hasImage: ${imageBytes != null}).")
             pendingFinishVoiceTurn = true
+            pendingImageBytes = imageBytes
             if (!isConnected && !isConnecting) connect()
             return
         }
-        finishVoiceTurnInternal()
+        finishVoiceTurnInternal(imageBytes)
     }
 
-    private fun finishVoiceTurnInternal() {
+    private fun finishVoiceTurnInternal(imageBytes: ByteArray? = null) {
         scope.launch {
             try {
-                // To complete a voice turn, clientContent MUST include a turn part (text can be empty)
-                // Sending clientContent without parts causes a 1007 Invalid Argument server rejection.
+                val parts = JSONArray()
+                // If a camera frame is provided, embed it directly into the turn as inlineData
+                if (imageBytes != null && imageBytes.isNotEmpty()) {
+                    val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                    parts.put(JSONObject().apply {
+                        put("inlineData", JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", base64Img)
+                        })
+                    })
+                    Log.d(TAG, "Embedded inline image frame into voice turn (${imageBytes.size} bytes)")
+                }
+                // At least one text part is required by the proto schema
+                parts.put(JSONObject().apply {
+                    put("text", "")
+                })
+
                 val finishObj = JSONObject().apply {
                     put("clientContent", JSONObject().apply {
                         put("turns", JSONArray().apply {
                             put(JSONObject().apply {
                                 put("role", "user")
-                                put("parts", JSONArray().apply {
-                                    put(JSONObject().apply {
-                                        put("text", "")
-                                    })
-                                })
+                                put("parts", parts)
                             })
                         })
                         put("turnComplete", true)
                     })
                 }
                 val sent = webSocket?.send(finishObj.toString()) ?: false
-                Log.d(TAG, "finishVoiceTurn dispatched (turnComplete: true): $sent")
+                Log.d(TAG, "finishVoiceTurn dispatched (hasImage: ${imageBytes != null}, turnComplete: true): $sent")
             } catch (e: Exception) {
                 Log.e(TAG, "Error finishing voice turn", e)
             }
@@ -388,22 +400,23 @@ class GeminiLiveClient(
                 Log.d(TAG, "Received setupComplete from Gemini Live server!")
                 isSetupComplete = true
 
-                // Flush pending image frame
-                pendingImageBytes?.let { img ->
-                    sendRealtimeImageInternal(img)
-                    pendingImageBytes = null
-                }
-
                 // Flush pending audio chunks
                 while (!pendingAudioQueue.isEmpty()) {
                     val chunk = pendingAudioQueue.poll() ?: break
                     sendRealtimeAudioInternal(chunk)
                 }
 
-                // Flush pending finish turn
+                // Flush pending finish turn (with pending camera frame if any)
                 if (pendingFinishVoiceTurn) {
                     pendingFinishVoiceTurn = false
-                    finishVoiceTurnInternal()
+                    val img = pendingImageBytes
+                    pendingImageBytes = null
+                    finishVoiceTurnInternal(img)
+                } else {
+                    pendingImageBytes?.let { img ->
+                        sendRealtimeImageInternal(img)
+                        pendingImageBytes = null
+                    }
                 }
 
                 // Flush pending text prompt
