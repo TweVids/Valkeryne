@@ -1,19 +1,18 @@
 package com.twevids.valkeryne.network
 
 import android.util.Base64
+import android.util.Log
 import com.twevids.valkeryne.model.AppSettings
+import kotlinx.coroutines.*
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 
 interface GeminiLiveListener {
@@ -30,8 +29,10 @@ class GeminiLiveClient(
     private var settings: AppSettings,
     private val listener: GeminiLiveListener
 ) {
-    // Disabled pingInterval to prevent "SocketTimeoutException: sent ping but didn't receive pong"
-    // Gemini Live API manages its own session lifecycle and does not require client-initiated ping frames.
+    companion object {
+        private const val TAG = "GeminiLiveClient"
+    }
+
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -39,29 +40,42 @@ class GeminiLiveClient(
         .retryOnConnectionFailure(true)
         .build()
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var webSocket: WebSocket? = null
     private var currentMessageId: String? = null
     private var accumulatedText = StringBuilder()
     private var accumulatedReasoning = StringBuilder()
+
+    @Volatile
     private var isConnected = false
+    @Volatile
     private var isConnecting = false
+    @Volatile
     private var isSetupComplete = false
+    @Volatile
+    private var isExplicitDisconnect = false
+
+    // Pending queues for audio, image, and turns during handshake
+    private val pendingAudioQueue = ConcurrentLinkedQueue<ByteArray>()
+    @Volatile
+    private var pendingImageBytes: ByteArray? = null
+    @Volatile
+    private var pendingFinishVoiceTurn = false
 
     private data class QueuedPrompt(
         val prompt: String,
         val messageId: String,
         val imageBytes: ByteArray? = null
     )
-
-    // Queue for messages sent while connection is establishing
     private var pendingPrompt: QueuedPrompt? = null
+    private var reconnectJob: Job? = null
 
     fun updateSettings(newSettings: AppSettings) {
         val needsReconnect = settings.apiKey != newSettings.apiKey || settings.modelId != newSettings.modelId
         settings = newSettings
-        if (needsReconnect && isConnected) {
+        if (needsReconnect) {
             disconnect()
+            connect()
         }
     }
 
@@ -74,6 +88,7 @@ class GeminiLiveClient(
             return
         }
 
+        isExplicitDisconnect = false
         isConnecting = true
         isSetupComplete = false
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = true)
@@ -83,13 +98,13 @@ class GeminiLiveClient(
 
         webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "WebSocket connected successfully. Dispatching setup...")
                 isConnected = true
                 isConnecting = false
                 listener.onConnectionStatusChanged(isConnected = true, isConnecting = false)
 
-                // 1. Send Setup payload as the FIRST message over the WebSocket
+                // Send Setup payload as the FIRST message over WebSocket
                 sendSetup(webSocket)
-                // Note: We MUST wait for server's "setupComplete" before dispatching any user turns
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -101,6 +116,7 @@ class GeminiLiveClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "WebSocket failure: ${t.localizedMessage}", t)
                 isConnected = false
                 isConnecting = false
                 isSetupComplete = false
@@ -116,11 +132,14 @@ class GeminiLiveClient(
                     } catch (_: Exception) {}
                 }
                 val targetId = currentMessageId ?: pendingPrompt?.messageId ?: ""
-                listener.onError(targetId, "WebSocket Error: $errorDesc")
+                listener.onError(targetId, "Live Error: $errorDesc")
                 pendingPrompt = null
+
+                scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket closed ($code): $reason")
                 isConnected = false
                 isConnecting = false
                 isSetupComplete = false
@@ -128,10 +147,23 @@ class GeminiLiveClient(
 
                 if (code != 1000) {
                     val targetId = currentMessageId ?: ""
-                    listener.onError(targetId, "Connection closed ($code): $reason")
+                    listener.onError(targetId, "Live Connection closed ($code): $reason")
+                    scheduleReconnect()
                 }
             }
         })
+    }
+
+    private fun scheduleReconnect() {
+        if (isExplicitDisconnect || settings.apiKey.isBlank()) return
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(2000)
+            if (!isConnected && !isConnecting && !isExplicitDisconnect) {
+                Log.d(TAG, "Auto-reconnecting to Gemini Live...")
+                connect()
+            }
+        }
     }
 
     private fun sendSetup(ws: WebSocket) {
@@ -148,14 +180,12 @@ class GeminiLiveClient(
                         })
                     })
                 })
-                // Thinking configuration: REQUIRED for extended-thinking, MUST be omitted for gemini-3.8-live
                 if (isExtendedThinking) {
                     put("thinkingConfig", JSONObject().apply {
                         put("thinkingLevel", "low")
                         put("includeThoughts", true)
                     })
                 }
-                // Token limit specific to Gemini 2.5 Flash Native Audio Preview
                 if (isGemini25) {
                     put("maxOutputTokens", 8192)
                 }
@@ -179,8 +209,9 @@ class GeminiLiveClient(
                 })
             }
             ws.send(setupObj.toString())
+            Log.d(TAG, "Setup message sent for model models/${settings.modelId}")
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to send setup", e)
         }
     }
 
@@ -188,6 +219,10 @@ class GeminiLiveClient(
         currentMessageId = messageId
         accumulatedText.clear()
         accumulatedReasoning.clear()
+        pendingAudioQueue.clear()
+        pendingImageBytes = null
+        pendingFinishVoiceTurn = false
+
         listener.onAiMessageStart(messageId)
 
         if (!isConnected && !isConnecting) {
@@ -195,8 +230,48 @@ class GeminiLiveClient(
         }
     }
 
+    fun sendRealtimeImage(imageBytes: ByteArray) {
+        if (!isConnected || !isSetupComplete || webSocket == null) {
+            Log.d(TAG, "Session not ready yet; buffering realtime image (${imageBytes.size} bytes)")
+            pendingImageBytes = imageBytes
+            if (!isConnected && !isConnecting) connect()
+            return
+        }
+        sendRealtimeImageInternal(imageBytes)
+    }
+
+    private fun sendRealtimeImageInternal(imageBytes: ByteArray) {
+        try {
+            val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+            val imgObj = JSONObject().apply {
+                put("realtimeInput", JSONObject().apply {
+                    put("mediaChunks", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", base64Img)
+                        })
+                    })
+                })
+            }
+            webSocket?.send(imgObj.toString())
+            Log.d(TAG, "Dispatched realtime image frame (${imageBytes.size} bytes)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending realtime image", e)
+        }
+    }
+
     fun sendRealtimeAudio(pcmBytes: ByteArray) {
-        if (!isConnected || webSocket == null) return
+        if (!isConnected || !isSetupComplete || webSocket == null) {
+            if (pendingAudioQueue.size < 50) { // Limit buffer to ~5s
+                pendingAudioQueue.offer(pcmBytes)
+            }
+            if (!isConnected && !isConnecting) connect()
+            return
+        }
+        sendRealtimeAudioInternal(pcmBytes)
+    }
+
+    private fun sendRealtimeAudioInternal(pcmBytes: ByteArray) {
         try {
             val base64Pcm = Base64.encodeToString(pcmBytes, Base64.NO_WRAP)
             val audioObj = JSONObject().apply {
@@ -211,41 +286,45 @@ class GeminiLiveClient(
             }
             webSocket?.send(audioObj.toString())
         } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    fun sendRealtimeImage(imageBytes: ByteArray) {
-        if (!isConnected || webSocket == null) return
-        try {
-            val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
-            val imgObj = JSONObject().apply {
-                put("realtimeInput", JSONObject().apply {
-                    put("mediaChunks", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("mimeType", "image/jpeg")
-                            put("data", base64Img)
-                        })
-                    })
-                })
-            }
-            webSocket?.send(imgObj.toString())
-        } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error sending realtime audio", e)
         }
     }
 
     fun finishVoiceTurn() {
-        if (!isConnected || webSocket == null) return
-        try {
-            val finishObj = JSONObject().apply {
-                put("clientContent", JSONObject().apply {
-                    put("turnComplete", true)
-                })
+        if (!isConnected || !isSetupComplete || webSocket == null) {
+            Log.d(TAG, "finishVoiceTurn requested before setupComplete. Marking pending.")
+            pendingFinishVoiceTurn = true
+            if (!isConnected && !isConnecting) connect()
+            return
+        }
+        finishVoiceTurnInternal()
+    }
+
+    private fun finishVoiceTurnInternal() {
+        scope.launch {
+            try {
+                // To complete a voice turn, clientContent MUST include a turn part (text can be empty)
+                // Sending clientContent without parts causes a 1007 Invalid Argument server rejection.
+                val finishObj = JSONObject().apply {
+                    put("clientContent", JSONObject().apply {
+                        put("turns", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("role", "user")
+                                put("parts", JSONArray().apply {
+                                    put(JSONObject().apply {
+                                        put("text", "")
+                                    })
+                                })
+                            })
+                        })
+                        put("turnComplete", true)
+                    })
+                }
+                val sent = webSocket?.send(finishObj.toString()) ?: false
+                Log.d(TAG, "finishVoiceTurn dispatched (turnComplete: true): $sent")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error finishing voice turn", e)
             }
-            webSocket?.send(finishObj.toString())
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
@@ -253,17 +332,12 @@ class GeminiLiveClient(
         currentMessageId = messageId
         accumulatedText.clear()
         accumulatedReasoning.clear()
-
         listener.onAiMessageStart(messageId)
 
         if (!isConnected || !isSetupComplete || webSocket == null) {
-            // Queue message and ensure connection is establishing
             pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
-            if (!isConnected && !isConnecting) {
-                connect()
-            }
+            if (!isConnected && !isConnecting) connect()
         } else {
-            // Connection is active and setup handshake confirmed, dispatch turn
             sendRealtimeMediaAndTurn(prompt, messageId, imageBytes)
         }
     }
@@ -271,26 +345,11 @@ class GeminiLiveClient(
     private fun sendRealtimeMediaAndTurn(prompt: String, messageId: String, imageBytes: ByteArray?) {
         scope.launch {
             try {
-                // 1. If an image is provided, stream it as realtimeInput mediaChunks
                 if (imageBytes != null && imageBytes.isNotEmpty()) {
-                    val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
-                    val imgObj = JSONObject().apply {
-                        put("realtimeInput", JSONObject().apply {
-                            put("mediaChunks", JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("mimeType", "image/jpeg")
-                                    put("data", base64Img)
-                                })
-                            })
-                        })
-                    }
-                    val sentImg = webSocket?.send(imgObj.toString()) ?: false
-                    android.util.Log.d("GeminiLiveClient", "Sent image frame: $sentImg (${imageBytes.size} bytes)")
-                    // Allow the live server vision pipeline 300ms to register the image frame before closing the turn
-                    delay(300)
+                    sendRealtimeImageInternal(imageBytes)
+                    delay(200)
                 }
 
-                // 2. Dispatch user prompt via clientContent
                 val effectivePrompt = if (prompt.isBlank() && imageBytes != null) {
                     "Describe what you see in this image."
                 } else {
@@ -313,12 +372,7 @@ class GeminiLiveClient(
                     })
                 }
                 val sent = webSocket?.send(inputObj.toString()) ?: false
-                android.util.Log.d("GeminiLiveClient", "Sent clientContent: $sent")
-                if (!sent) {
-                    pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
-                    disconnect()
-                    connect()
-                }
+                Log.d(TAG, "Sent clientContent text turn: $sent")
             } catch (e: Exception) {
                 listener.onError(messageId, "Failed to send message: ${e.localizedMessage}")
             }
@@ -331,7 +385,28 @@ class GeminiLiveClient(
 
             // 1. Setup handshake confirmation
             if (root.has("setupComplete")) {
+                Log.d(TAG, "Received setupComplete from Gemini Live server!")
                 isSetupComplete = true
+
+                // Flush pending image frame
+                pendingImageBytes?.let { img ->
+                    sendRealtimeImageInternal(img)
+                    pendingImageBytes = null
+                }
+
+                // Flush pending audio chunks
+                while (!pendingAudioQueue.isEmpty()) {
+                    val chunk = pendingAudioQueue.poll() ?: break
+                    sendRealtimeAudioInternal(chunk)
+                }
+
+                // Flush pending finish turn
+                if (pendingFinishVoiceTurn) {
+                    pendingFinishVoiceTurn = false
+                    finishVoiceTurnInternal()
+                }
+
+                // Flush pending text prompt
                 pendingPrompt?.let { q ->
                     sendRealtimeMediaAndTurn(q.prompt, q.messageId, q.imageBytes)
                     pendingPrompt = null
@@ -339,19 +414,22 @@ class GeminiLiveClient(
                 return
             }
 
-            // 2. Handle GoAway control message (session expiring or terminating)
+            // 2. Handle GoAway control message
             if (root.has("goAway")) {
+                Log.w(TAG, "Received goAway from server. Reconnecting session.")
                 isConnected = false
                 isSetupComplete = false
+                scheduleReconnect()
                 return
             }
 
-            val msgId = currentMessageId ?: pendingPrompt?.messageId ?: return
+            val msgId = currentMessageId ?: pendingPrompt?.messageId ?: ""
 
             if (root.has("error")) {
                 val errObj = root.getJSONObject("error")
                 val errMsg = errObj.optString("message", "API Error occurred")
-                listener.onError(msgId, "Gemini API Error: $errMsg")
+                Log.e(TAG, "Gemini API Error: $errMsg")
+                listener.onError(msgId, "Gemini Error: $errMsg")
                 return
             }
 
@@ -364,7 +442,7 @@ class GeminiLiveClient(
                 for (i in 0 until parts.length()) {
                     val part = parts.getJSONObject(i)
 
-                    // Reasoning / Thinking check
+                    // Reasoning / Thinking thoughts
                     val isThought = part.optBoolean("thought", false)
                     if (isThought && part.has("text")) {
                         accumulatedReasoning.append(part.getString("text"))
@@ -374,7 +452,7 @@ class GeminiLiveClient(
                         listener.onTextUpdate(msgId, accumulatedText.toString())
                     }
 
-                    // Audio PCM
+                    // Audio PCM (24kHz 16-bit little-endian)
                     if (part.has("inlineData")) {
                         val inline = part.getJSONObject("inlineData")
                         val base64Data = inline.optString("data")
@@ -395,15 +473,18 @@ class GeminiLiveClient(
             }
 
             if (serverContent.optBoolean("turnComplete", false)) {
+                Log.d(TAG, "Model turn complete for message: $msgId")
                 listener.onTurnComplete(msgId)
             }
         } catch (e: Exception) {
-            val targetId = currentMessageId ?: ""
-            listener.onError(targetId, "Parsing error: ${e.localizedMessage}")
+            Log.e(TAG, "Error handling incoming message: ${e.localizedMessage}", e)
         }
     }
 
     fun disconnect() {
+        isExplicitDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
         try {
             webSocket?.close(1000, "User disconnected")
         } catch (e: Exception) {
@@ -414,6 +495,9 @@ class GeminiLiveClient(
         isConnecting = false
         isSetupComplete = false
         currentMessageId = null
+        pendingAudioQueue.clear()
+        pendingImageBytes = null
+        pendingFinishVoiceTurn = false
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
     }
 }

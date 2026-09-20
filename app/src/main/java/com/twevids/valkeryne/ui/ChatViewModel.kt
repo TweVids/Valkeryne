@@ -94,17 +94,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
 
         val aiMessageId = "ai_${System.currentTimeMillis()}"
 
-        // 1. If camera is active, capture & send current frame as realtime image
-        if (_isCameraEnabled.value && currentFrame != null) {
-            val imageBytes = compressBitmap(currentFrame)
-            if (imageBytes != null) {
-                geminiClient.sendRealtimeImage(imageBytes)
-            }
-        }
-
-        // 2. Begin AI turn and start streaming voice chunks from mic
+        // 1. Begin AI turn and start streaming voice chunks from mic immediately
         geminiClient.startVoiceTurn(aiMessageId)
         audioRecorder?.start()
+
+        // 2. If camera is active, compress & send current frame concurrently on background thread
+        if (_isCameraEnabled.value && currentFrame != null) {
+            viewModelScope.launch(Dispatchers.Default) {
+                val imageBytes = compressBitmap(currentFrame)
+                if (imageBytes != null) {
+                    geminiClient.sendRealtimeImage(imageBytes)
+                }
+            }
+        }
     }
 
     fun onHoldToSpeechEnd() {
@@ -190,6 +192,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
                 if (msg.id == messageId) {
                     msg.copy(error = errorMessage, isStreaming = false)
                 } else msg
+            }
+        } else {
+            val last = _messages.value.lastOrNull()
+            if (last != null && last.sender == MessageSender.AI) {
+                _messages.value = _messages.value.map { msg ->
+                    if (msg.id == last.id) msg.copy(error = errorMessage, isStreaming = false) else msg
+                }
+            } else {
+                _messages.value = _messages.value + ChatMessage(
+                    id = "err_${System.currentTimeMillis()}",
+                    sender = MessageSender.AI,
+                    error = errorMessage,
+                    isStreaming = false
+                )
             }
         }
     }

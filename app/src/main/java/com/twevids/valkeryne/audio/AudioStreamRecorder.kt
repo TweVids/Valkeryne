@@ -25,7 +25,7 @@ class AudioStreamRecorder(
         if (isRecording) return
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 sampleRate,
                 channelConfig,
                 audioFormat,

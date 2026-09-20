@@ -292,11 +292,13 @@ class MainActivity : ComponentActivity() {
                                 .pointerInput(Unit) {
                                     detectTapGestures(
                                         onPress = {
-                                            // Capture current frame from camera preview view
-                                            val currentFrame = previewViewRef?.bitmap
+                                            val currentFrame = if (isCameraEnabled) previewViewRef?.bitmap else null
                                             viewModel.onHoldToSpeechStart(currentFrame)
-                                            tryAwaitRelease()
-                                            viewModel.onHoldToSpeechEnd()
+                                            try {
+                                                tryAwaitRelease()
+                                            } finally {
+                                                viewModel.onHoldToSpeechEnd()
+                                            }
                                         }
                                     )
                                 }
