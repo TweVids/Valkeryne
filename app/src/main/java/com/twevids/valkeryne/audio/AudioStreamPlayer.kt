@@ -76,16 +76,13 @@ class AudioStreamPlayer {
                 _isPlaying.value = true
 
                 while (isActive) {
-                    // Poll with a brief timeout; if no chunk arrives for 1.5 seconds, wait or finish
-                    val chunk = chunkQueue.poll()
+                    // Wait up to 1.5s for the next streaming chunk to arrive over the network
+                    val chunk = chunkQueue.poll(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
                     if (chunk != null) {
                         track.write(chunk, 0, chunk.size)
                     } else {
-                        // Queue temporarily empty; check if we should stop
-                        if (chunkQueue.isEmpty()) {
-                            _isPlaying.value = false
-                            break
-                        }
+                        // Stream idle or finished
+                        break
                     }
                 }
             } catch (e: Exception) {

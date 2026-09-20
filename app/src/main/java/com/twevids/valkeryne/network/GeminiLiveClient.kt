@@ -7,6 +7,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -84,13 +85,25 @@ class GeminiLiveClient(
                 handleIncomingMessage(text)
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                handleIncomingMessage(bytes.utf8())
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 isConnected = false
                 isConnecting = false
                 isSetupComplete = false
                 listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
 
-                val errorDesc = t.localizedMessage ?: "Network connection failure"
+                val errorDesc = StringBuilder(t.localizedMessage ?: "Network connection failure")
+                response?.let { resp ->
+                    try {
+                        val body = resp.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            errorDesc.append(" (HTTP ").append(resp.code).append(": ").append(body).append(")")
+                        }
+                    } catch (_: Exception) {}
+                }
                 val targetId = currentMessageId ?: pendingPrompt?.second ?: ""
                 listener.onError(targetId, "WebSocket Error: $errorDesc")
                 pendingPrompt = null
