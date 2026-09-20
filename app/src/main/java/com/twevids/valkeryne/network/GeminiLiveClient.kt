@@ -40,7 +40,7 @@ class GeminiLiveClient(
     private var accumulatedReasoning = StringBuilder()
     private var isConnected = false
     private var isConnecting = false
-    private var setupSent = false
+    private var isSetupComplete = false
 
     // Queue for messages sent while connection is establishing
     private var pendingPrompt: Pair<String, String>? = null
@@ -63,6 +63,7 @@ class GeminiLiveClient(
         }
 
         isConnecting = true
+        isSetupComplete = false
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = true)
 
         val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key"
@@ -76,13 +77,7 @@ class GeminiLiveClient(
 
                 // 1. Send Setup payload as the FIRST message over the WebSocket
                 sendSetup(webSocket)
-                setupSent = true
-
-                // 2. If a message was queued while connecting, send it now that setup is complete
-                pendingPrompt?.let { (prompt, msgId) ->
-                    sendRealtimeText(prompt, msgId)
-                    pendingPrompt = null
-                }
+                // Note: We MUST wait for server's "setupComplete" before dispatching any user turns
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -92,7 +87,7 @@ class GeminiLiveClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 isConnected = false
                 isConnecting = false
-                setupSent = false
+                isSetupComplete = false
                 listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
 
                 val errorDesc = t.localizedMessage ?: "Network connection failure"
@@ -104,7 +99,7 @@ class GeminiLiveClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 isConnected = false
                 isConnecting = false
-                setupSent = false
+                isSetupComplete = false
                 listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
 
                 if (code != 1000) {
@@ -146,13 +141,15 @@ class GeminiLiveClient(
                 put("setup", JSONObject().apply {
                     put("model", "models/${settings.modelId}")
                     put("generationConfig", generationConfig)
-                    put("systemInstruction", JSONObject().apply {
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("text", settings.systemInstruction)
+                    if (settings.systemInstruction.isNotBlank()) {
+                        put("systemInstruction", JSONObject().apply {
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", settings.systemInstruction)
+                                })
                             })
                         })
-                    })
+                    }
                     put("outputAudioTranscription", JSONObject())
                     put("inputAudioTranscription", JSONObject())
                 })
@@ -170,26 +167,37 @@ class GeminiLiveClient(
 
         listener.onAiMessageStart(messageId)
 
-        if (!isConnected || !setupSent || webSocket == null) {
-            // Queue message and connect first
+        if (!isConnected || !isSetupComplete || webSocket == null) {
+            // Queue message and ensure connection is establishing
             pendingPrompt = Pair(prompt, messageId)
-            connect()
+            if (!isConnected && !isConnecting) {
+                connect()
+            }
         } else {
-            // Already connected and setup sent, dispatch immediately
-            sendRealtimeText(prompt, messageId)
+            // Connection is active and setup handshake confirmed, dispatch turn
+            sendClientContent(prompt, messageId)
         }
     }
 
-    private fun sendRealtimeText(prompt: String, messageId: String) {
+    private fun sendClientContent(prompt: String, messageId: String) {
         try {
             val inputObj = JSONObject().apply {
-                put("realtimeInput", JSONObject().apply {
-                    put("text", prompt)
+                put("clientContent", JSONObject().apply {
+                    put("turns", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", prompt)
+                                })
+                            })
+                        })
+                    })
+                    put("turnComplete", true)
                 })
             }
             val sent = webSocket?.send(inputObj.toString()) ?: false
             if (!sent) {
-                // Connection might be stale, retry with fresh connection
                 pendingPrompt = Pair(prompt, messageId)
                 disconnect()
                 connect()
@@ -200,18 +208,27 @@ class GeminiLiveClient(
     }
 
     private fun handleIncomingMessage(jsonText: String) {
-        val msgId = currentMessageId ?: return
-
         try {
             val root = JSONObject(jsonText)
 
-            // Handle GoAway control message (session expiring or terminating)
-            if (root.has("goAway")) {
-                // Mark for fresh connection on next request
-                isConnected = false
-                setupSent = false
+            // 1. Setup handshake confirmation
+            if (root.has("setupComplete")) {
+                isSetupComplete = true
+                pendingPrompt?.let { (prompt, msgId) ->
+                    sendClientContent(prompt, msgId)
+                    pendingPrompt = null
+                }
                 return
             }
+
+            // 2. Handle GoAway control message (session expiring or terminating)
+            if (root.has("goAway")) {
+                isConnected = false
+                isSetupComplete = false
+                return
+            }
+
+            val msgId = currentMessageId ?: pendingPrompt?.second ?: return
 
             if (root.has("error")) {
                 val errObj = root.getJSONObject("error")
@@ -251,22 +268,20 @@ class GeminiLiveClient(
                 }
             }
 
-            // Transcriptions
+            // Output Audio Transcriptions
             val transcription = serverContent.optJSONObject("outputTranscription")
             if (transcription != null && transcription.has("text")) {
                 val spokenText = transcription.getString("text")
-                if (!accumulatedText.contains(spokenText)) {
-                    if (accumulatedText.isNotEmpty()) accumulatedText.append(" ")
-                    accumulatedText.append(spokenText)
-                    listener.onTextUpdate(msgId, accumulatedText.toString())
-                }
+                accumulatedText.append(spokenText)
+                listener.onTextUpdate(msgId, accumulatedText.toString())
             }
 
             if (serverContent.optBoolean("turnComplete", false)) {
                 listener.onTurnComplete(msgId)
             }
         } catch (e: Exception) {
-            listener.onError(msgId, "Parsing error: ${e.localizedMessage}")
+            val targetId = currentMessageId ?: ""
+            listener.onError(targetId, "Parsing error: ${e.localizedMessage}")
         }
     }
 
@@ -279,7 +294,7 @@ class GeminiLiveClient(
         webSocket = null
         isConnected = false
         isConnecting = false
-        setupSent = false
+        isSetupComplete = false
         currentMessageId = null
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
     }
