@@ -8,6 +8,10 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -35,6 +39,7 @@ class GeminiLiveClient(
         .retryOnConnectionFailure(true)
         .build()
 
+    private val scope = CoroutineScope(Dispatchers.IO)
     private var webSocket: WebSocket? = null
     private var currentMessageId: String? = null
     private var accumulatedText = StringBuilder()
@@ -199,53 +204,59 @@ class GeminiLiveClient(
     }
 
     private fun sendRealtimeMediaAndTurn(prompt: String, messageId: String, imageBytes: ByteArray?) {
-        try {
-            // 1. If an image is provided, stream it as realtimeInput mediaChunks
-            if (imageBytes != null && imageBytes.isNotEmpty()) {
-                val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
-                val imgObj = JSONObject().apply {
-                    put("realtimeInput", JSONObject().apply {
-                        put("mediaChunks", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("mimeType", "image/jpeg")
-                                put("data", base64Img)
-                            })
-                        })
-                    })
-                }
-                webSocket?.send(imgObj.toString())
-            }
-
-            // 2. Dispatch user prompt via clientContent
-            val effectivePrompt = if (prompt.isBlank() && imageBytes != null) {
-                "Describe what you see in this image."
-            } else {
-                prompt
-            }
-
-            val inputObj = JSONObject().apply {
-                put("clientContent", JSONObject().apply {
-                    put("turns", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("role", "user")
-                            put("parts", JSONArray().apply {
+        scope.launch {
+            try {
+                // 1. If an image is provided, stream it as realtimeInput mediaChunks
+                if (imageBytes != null && imageBytes.isNotEmpty()) {
+                    val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                    val imgObj = JSONObject().apply {
+                        put("realtimeInput", JSONObject().apply {
+                            put("mediaChunks", JSONArray().apply {
                                 put(JSONObject().apply {
-                                    put("text", effectivePrompt)
+                                    put("mimeType", "image/jpeg")
+                                    put("data", base64Img)
                                 })
                             })
                         })
+                    }
+                    val sentImg = webSocket?.send(imgObj.toString()) ?: false
+                    android.util.Log.d("GeminiLiveClient", "Sent image frame: $sentImg (${imageBytes.size} bytes)")
+                    // Allow the live server vision pipeline 300ms to register the image frame before closing the turn
+                    delay(300)
+                }
+
+                // 2. Dispatch user prompt via clientContent
+                val effectivePrompt = if (prompt.isBlank() && imageBytes != null) {
+                    "Describe what you see in this image."
+                } else {
+                    prompt
+                }
+
+                val inputObj = JSONObject().apply {
+                    put("clientContent", JSONObject().apply {
+                        put("turns", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("role", "user")
+                                put("parts", JSONArray().apply {
+                                    put(JSONObject().apply {
+                                        put("text", effectivePrompt)
+                                    })
+                                })
+                            })
+                        })
+                        put("turnComplete", true)
                     })
-                    put("turnComplete", true)
-                })
+                }
+                val sent = webSocket?.send(inputObj.toString()) ?: false
+                android.util.Log.d("GeminiLiveClient", "Sent clientContent: $sent")
+                if (!sent) {
+                    pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
+                    disconnect()
+                    connect()
+                }
+            } catch (e: Exception) {
+                listener.onError(messageId, "Failed to send message: ${e.localizedMessage}")
             }
-            val sent = webSocket?.send(inputObj.toString()) ?: false
-            if (!sent) {
-                pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
-                disconnect()
-                connect()
-            }
-        } catch (e: Exception) {
-            listener.onError(messageId, "Failed to send message: ${e.localizedMessage}")
         }
     }
 

@@ -71,9 +71,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
 
         var imageBytes: ByteArray? = null
         if (imageBitmap != null) {
-            val stream = java.io.ByteArrayOutputStream()
-            imageBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, stream)
-            imageBytes = stream.toByteArray()
+            try {
+                // Ensure software bitmap (cannot compress hardware-backed bitmaps)
+                val softwareBmp = if (imageBitmap.config == android.graphics.Bitmap.Config.HARDWARE) {
+                    imageBitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                } else {
+                    imageBitmap
+                }
+                // Scale to max 1024x1024 for optimal Gemini vision latency & bandwidth
+                val maxDim = 1024
+                val scaledBmp = if (softwareBmp.width > maxDim || softwareBmp.height > maxDim) {
+                    val ratio = softwareBmp.width.toFloat() / softwareBmp.height.toFloat()
+                    val (w, h) = if (ratio > 1f) {
+                        Pair(maxDim, (maxDim / ratio).toInt())
+                    } else {
+                        Pair((maxDim * ratio).toInt(), maxDim)
+                    }
+                    android.graphics.Bitmap.createScaledBitmap(softwareBmp, w, h, true)
+                } else {
+                    softwareBmp
+                }
+                val stream = java.io.ByteArrayOutputStream()
+                scaledBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, stream)
+                imageBytes = stream.toByteArray()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
 
         val userMessage = ChatMessage(
