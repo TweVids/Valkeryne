@@ -26,7 +26,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.twevids.valkeryne.model.AppSettings
 import com.twevids.valkeryne.model.LiveModels
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(
     settings: AppSettings,
