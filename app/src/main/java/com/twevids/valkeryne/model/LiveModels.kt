@@ -48,6 +48,7 @@ data class ChatMessage(
     val text: String = "",
     val reasoning: String = "",
     val audioChunks: List<ByteArray> = emptyList(),
+    val imageBitmap: android.graphics.Bitmap? = null,
     val isStreaming: Boolean = false,
     val error: String? = null,
     val timestamp: Long = System.currentTimeMillis()

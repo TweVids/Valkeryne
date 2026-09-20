@@ -43,8 +43,14 @@ class GeminiLiveClient(
     private var isConnecting = false
     private var isSetupComplete = false
 
+    private data class QueuedPrompt(
+        val prompt: String,
+        val messageId: String,
+        val imageBytes: ByteArray? = null
+    )
+
     // Queue for messages sent while connection is establishing
-    private var pendingPrompt: Pair<String, String>? = null
+    private var pendingPrompt: QueuedPrompt? = null
 
     fun updateSettings(newSettings: AppSettings) {
         val needsReconnect = settings.apiKey != newSettings.apiKey || settings.modelId != newSettings.modelId
@@ -104,7 +110,7 @@ class GeminiLiveClient(
                         }
                     } catch (_: Exception) {}
                 }
-                val targetId = currentMessageId ?: pendingPrompt?.second ?: ""
+                val targetId = currentMessageId ?: pendingPrompt?.messageId ?: ""
                 listener.onError(targetId, "WebSocket Error: $errorDesc")
                 pendingPrompt = null
             }
@@ -173,7 +179,7 @@ class GeminiLiveClient(
         }
     }
 
-    fun sendMessage(prompt: String, messageId: String) {
+    fun sendMessage(prompt: String, messageId: String, imageBytes: ByteArray? = null) {
         currentMessageId = messageId
         accumulatedText.clear()
         accumulatedReasoning.clear()
@@ -182,18 +188,41 @@ class GeminiLiveClient(
 
         if (!isConnected || !isSetupComplete || webSocket == null) {
             // Queue message and ensure connection is establishing
-            pendingPrompt = Pair(prompt, messageId)
+            pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
             if (!isConnected && !isConnecting) {
                 connect()
             }
         } else {
             // Connection is active and setup handshake confirmed, dispatch turn
-            sendClientContent(prompt, messageId)
+            sendRealtimeMediaAndTurn(prompt, messageId, imageBytes)
         }
     }
 
-    private fun sendClientContent(prompt: String, messageId: String) {
+    private fun sendRealtimeMediaAndTurn(prompt: String, messageId: String, imageBytes: ByteArray?) {
         try {
+            // 1. If an image is provided, stream it as realtimeInput mediaChunks
+            if (imageBytes != null && imageBytes.isNotEmpty()) {
+                val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                val imgObj = JSONObject().apply {
+                    put("realtimeInput", JSONObject().apply {
+                        put("mediaChunks", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("mimeType", "image/jpeg")
+                                put("data", base64Img)
+                            })
+                        })
+                    })
+                }
+                webSocket?.send(imgObj.toString())
+            }
+
+            // 2. Dispatch user prompt via clientContent
+            val effectivePrompt = if (prompt.isBlank() && imageBytes != null) {
+                "Describe what you see in this image."
+            } else {
+                prompt
+            }
+
             val inputObj = JSONObject().apply {
                 put("clientContent", JSONObject().apply {
                     put("turns", JSONArray().apply {
@@ -201,7 +230,7 @@ class GeminiLiveClient(
                             put("role", "user")
                             put("parts", JSONArray().apply {
                                 put(JSONObject().apply {
-                                    put("text", prompt)
+                                    put("text", effectivePrompt)
                                 })
                             })
                         })
@@ -211,7 +240,7 @@ class GeminiLiveClient(
             }
             val sent = webSocket?.send(inputObj.toString()) ?: false
             if (!sent) {
-                pendingPrompt = Pair(prompt, messageId)
+                pendingPrompt = QueuedPrompt(prompt, messageId, imageBytes)
                 disconnect()
                 connect()
             }
@@ -227,8 +256,8 @@ class GeminiLiveClient(
             // 1. Setup handshake confirmation
             if (root.has("setupComplete")) {
                 isSetupComplete = true
-                pendingPrompt?.let { (prompt, msgId) ->
-                    sendClientContent(prompt, msgId)
+                pendingPrompt?.let { q ->
+                    sendRealtimeMediaAndTurn(q.prompt, q.messageId, q.imageBytes)
                     pendingPrompt = null
                 }
                 return
@@ -241,7 +270,7 @@ class GeminiLiveClient(
                 return
             }
 
-            val msgId = currentMessageId ?: pendingPrompt?.second ?: return
+            val msgId = currentMessageId ?: pendingPrompt?.messageId ?: return
 
             if (root.has("error")) {
                 val errObj = root.getJSONObject("error")

@@ -45,13 +45,28 @@ fun ChatMessageBubble(
                 shadowElevation = 1.dp,
                 modifier = Modifier.widthIn(max = 300.dp)
             ) {
-                Text(
-                    text = message.text,
-                    color = Color(0xFFF9FAFB),
-                    fontSize = 15.sp,
-                    lineHeight = 21.sp,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                )
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    if (message.imageBitmap != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = androidx.compose.ui.graphics.asImageBitmap(message.imageBitmap),
+                            contentDescription = "Captured Image",
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp)
+                                .androidx.compose.ui.draw.clip(RoundedCornerShape(10.dp))
+                                .padding(bottom = if (message.text.isNotEmpty()) 8.dp else 0.dp)
+                        )
+                    }
+                    if (message.text.isNotEmpty()) {
+                        Text(
+                            text = message.text,
+                            color = Color(0xFFF9FAFB),
+                            fontSize = 15.sp,
+                            lineHeight = 21.sp
+                        )
+                    }
+                }
             }
         } else {
             // AI Message Bubble (Left-aligned, rounded)

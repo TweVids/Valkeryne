@@ -58,9 +58,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
         closeSettings()
     }
 
-    fun sendMessage(text: String) {
+    fun sendMessage(text: String, imageBitmap: android.graphics.Bitmap? = null) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() && imageBitmap == null) return
 
         if (_settings.value.apiKey.isEmpty()) {
             openSettings()
@@ -69,16 +69,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
 
         audioPlayer.stop()
 
+        var imageBytes: ByteArray? = null
+        if (imageBitmap != null) {
+            val stream = java.io.ByteArrayOutputStream()
+            imageBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, stream)
+            imageBytes = stream.toByteArray()
+        }
+
         val userMessage = ChatMessage(
             id = "user_${System.currentTimeMillis()}",
             sender = MessageSender.USER,
-            text = trimmed
+            text = trimmed,
+            imageBitmap = imageBitmap
         )
 
         val aiMessageId = "ai_${System.currentTimeMillis()}"
 
         _messages.value = _messages.value + userMessage
-        geminiClient.sendMessage(trimmed, aiMessageId)
+        geminiClient.sendMessage(trimmed, aiMessageId, imageBytes)
     }
 
     fun toggleAudioPlayback(message: ChatMessage) {

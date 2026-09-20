@@ -62,7 +62,7 @@ class MainActivity : ComponentActivity() {
                     },
                     bottomBar = {
                         ChatInputBar(
-                            onSendMessage = { text -> viewModel.sendMessage(text) }
+                            onSendMessage = { text, bitmap -> viewModel.sendMessage(text, bitmap) }
                         )
                     }
                 ) { innerPadding ->
