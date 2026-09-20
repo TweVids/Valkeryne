@@ -50,7 +50,9 @@ class AudioStreamPlayer {
                 )
                 .setBufferSizeInBytes(minBufferSize * 4)
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+                .build().also {
+                    it.setVolume(1.0f)
+                }
         }
         return audioTrack!!
     }

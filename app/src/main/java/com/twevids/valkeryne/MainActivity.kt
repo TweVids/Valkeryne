@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
             val isCameraEnabled by viewModel.isCameraEnabled.collectAsState()
             val isFrontCamera by viewModel.isFrontCamera.collectAsState()
             val isHoldingToSpeak by viewModel.isHoldingToSpeak.collectAsState()
+            val isAudioPlaying by viewModel.audioPlayer.isPlaying.collectAsState()
 
             var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
 
@@ -167,7 +168,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // 3. Subtitle / AI Speech Overlay
-                if (latestAiMessage != null && (latestAiMessage.text.isNotEmpty() || latestAiMessage.reasoning.isNotEmpty() || latestAiMessage.isStreaming || latestAiMessage.error != null)) {
+                if (latestAiMessage != null && (latestAiMessage.text.isNotEmpty() || latestAiMessage.reasoning.isNotEmpty() || latestAiMessage.isStreaming || isAudioPlaying || latestAiMessage.error != null)) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -209,6 +210,22 @@ class MainActivity : ComponentActivity() {
                                             lineHeight = 22.sp,
                                             fontWeight = FontWeight.Normal
                                         )
+                                    } else if (isAudioPlaying) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.VolumeUp,
+                                                contentDescription = "Speaking",
+                                                tint = Color(0xFF60A5FA),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "Gemini is speaking...",
+                                                color = Color(0xFF60A5FA),
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
                                     } else if (latestAiMessage.isStreaming) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             CircularProgressIndicator(

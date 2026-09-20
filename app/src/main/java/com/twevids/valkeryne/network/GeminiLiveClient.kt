@@ -71,8 +71,12 @@ class GeminiLiveClient(
     private var reconnectJob: Job? = null
 
     fun updateSettings(newSettings: AppSettings) {
-        val needsReconnect = settings.apiKey != newSettings.apiKey || settings.modelId != newSettings.modelId
+        val oldSettings = settings
         settings = newSettings
+        val needsReconnect = oldSettings.apiKey != newSettings.apiKey ||
+                oldSettings.modelId != newSettings.modelId ||
+                oldSettings.voiceName != newSettings.voiceName ||
+                oldSettings.systemInstruction != newSettings.systemInstruction
         if (needsReconnect) {
             disconnect()
             connect()
@@ -97,25 +101,35 @@ class GeminiLiveClient(
         val request = Request.Builder().url(url).build()
 
         webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                if (ws != this@GeminiLiveClient.webSocket) {
+                    Log.d(TAG, "Ignoring onOpen from stale WebSocket")
+                    return
+                }
                 Log.d(TAG, "WebSocket connected successfully. Dispatching setup...")
                 isConnected = true
                 isConnecting = false
                 listener.onConnectionStatusChanged(isConnected = true, isConnecting = false)
 
                 // Send Setup payload as the FIRST message over WebSocket
-                sendSetup(webSocket)
+                sendSetup(ws)
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
+            override fun onMessage(ws: WebSocket, text: String) {
+                if (ws != this@GeminiLiveClient.webSocket) return
                 handleIncomingMessage(text)
             }
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                if (ws != this@GeminiLiveClient.webSocket) return
                 handleIncomingMessage(bytes.utf8())
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                if (ws != this@GeminiLiveClient.webSocket) {
+                    Log.d(TAG, "Ignoring onFailure from stale WebSocket")
+                    return
+                }
                 Log.e(TAG, "WebSocket failure: ${t.localizedMessage}", t)
                 isConnected = false
                 isConnecting = false
@@ -138,7 +152,11 @@ class GeminiLiveClient(
                 scheduleReconnect()
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                if (ws != this@GeminiLiveClient.webSocket) {
+                    Log.d(TAG, "Ignoring onClosed from stale WebSocket")
+                    return
+                }
                 Log.w(TAG, "WebSocket closed ($code): $reason")
                 isConnected = false
                 isConnecting = false
@@ -314,12 +332,17 @@ class GeminiLiveClient(
                             put("data", base64Img)
                         })
                     })
+                    // Ensure the model knows to respond to the visual frame and any concurrent speech
+                    parts.put(JSONObject().apply {
+                        put("text", "Please answer based on the visual camera frame and any spoken audio.")
+                    })
                     Log.d(TAG, "Embedded inline image frame into voice turn (${imageBytes.size} bytes)")
+                } else {
+                    // Audio-only turn: empty text part is required by schema
+                    parts.put(JSONObject().apply {
+                        put("text", "")
+                    })
                 }
-                // At least one text part is required by the proto schema
-                parts.put(JSONObject().apply {
-                    put("text", "")
-                })
 
                 val finishObj = JSONObject().apply {
                     put("clientContent", JSONObject().apply {
@@ -498,12 +521,13 @@ class GeminiLiveClient(
         isExplicitDisconnect = true
         reconnectJob?.cancel()
         reconnectJob = null
+        val wsToCancel = webSocket
+        webSocket = null
         try {
-            webSocket?.close(1000, "User disconnected")
+            wsToCancel?.cancel()
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        webSocket = null
         isConnected = false
         isConnecting = false
         isSetupComplete = false

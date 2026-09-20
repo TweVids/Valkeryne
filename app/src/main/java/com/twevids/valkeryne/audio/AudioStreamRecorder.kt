@@ -17,7 +17,8 @@ class AudioStreamRecorder(
 
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Volatile
     private var isRecording = false
 
     @SuppressLint("MissingPermission")
@@ -50,9 +51,15 @@ class AudioStreamRecorder(
             recordingJob = scope.launch {
                 val buffer = ByteArray(bufferSize)
                 while (isActive && isRecording) {
-                    val readBytes = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (readBytes > 0) {
-                        onAudioChunk(buffer.copyOf(readBytes))
+                    try {
+                        val record = audioRecord ?: break
+                        if (!isRecording || record.recordingState != AudioRecord.RECORDSTATE_RECORDING) break
+                        val readBytes = record.read(buffer, 0, buffer.size)
+                        if (readBytes > 0 && isRecording) {
+                            onAudioChunk(buffer.copyOf(readBytes))
+                        }
+                    } catch (t: Throwable) {
+                        break
                     }
                 }
             }
@@ -67,11 +74,14 @@ class AudioStreamRecorder(
         recordingJob?.cancel()
         recordingJob = null
         try {
-            audioRecord?.stop()
-            audioRecord?.release()
+            val record = audioRecord
+            audioRecord = null
+            if (record?.state == AudioRecord.STATE_INITIALIZED) {
+                record.stop()
+                record.release()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        audioRecord = null
     }
 }

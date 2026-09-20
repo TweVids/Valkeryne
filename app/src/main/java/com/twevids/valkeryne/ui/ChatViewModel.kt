@@ -122,9 +122,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
 
         viewModelScope.launch {
             try {
-                pendingFrameJob?.join()
-            } catch (e: Exception) {
-                e.printStackTrace()
+                kotlinx.coroutines.withTimeoutOrNull(1500) {
+                    pendingFrameJob?.join()
+                }
+            } catch (t: Throwable) {
+                t.printStackTrace()
             }
             val frame = capturedFrameBytes
             capturedFrameBytes = null
@@ -139,8 +141,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
                 bitmap.copy(Bitmap.Config.ARGB_8888, false)
             } else {
                 bitmap
-            }
-            val maxDim = 1024
+            } ?: return null
+
+            val maxDim = 640
             val scaledBmp = if (softwareBmp.width > maxDim || softwareBmp.height > maxDim) {
                 val ratio = softwareBmp.width.toFloat() / softwareBmp.height.toFloat()
                 val (w, h) = if (ratio > 1f) {
@@ -148,15 +151,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), G
                 } else {
                     Pair((maxDim * ratio).toInt(), maxDim)
                 }
-                Bitmap.createScaledBitmap(softwareBmp, w, h, true)
+                Bitmap.createScaledBitmap(softwareBmp, maxOf(1, w), maxOf(1, h), true)
             } else {
                 softwareBmp
             }
             val stream = java.io.ByteArrayOutputStream()
-            scaledBmp.compress(Bitmap.CompressFormat.JPEG, 80, stream)
-            stream.toByteArray()
-        } catch (e: Exception) {
-            e.printStackTrace()
+            scaledBmp.compress(Bitmap.CompressFormat.JPEG, 70, stream)
+            val bytes = stream.toByteArray()
+            if (softwareBmp != bitmap && softwareBmp != scaledBmp) {
+                softwareBmp.recycle()
+            }
+            if (scaledBmp != bitmap) {
+                scaledBmp.recycle()
+            }
+            bytes
+        } catch (t: Throwable) {
+            android.util.Log.e("ChatViewModel", "Error compressing bitmap", t)
             null
         }
     }
