@@ -3,7 +3,7 @@ package com.twevids.valkeryne
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.viewModels
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,11 +26,11 @@ import com.twevids.valkeryne.ui.components.Header
 import com.twevids.valkeryne.ui.components.SettingsDialog
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: ChatViewModel by viewModels()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val viewModel: ChatViewModel = viewModel()
+
             MaterialTheme {
                 val settings by viewModel.settings.collectAsState()
                 val messages by viewModel.messages.collectAsState()
