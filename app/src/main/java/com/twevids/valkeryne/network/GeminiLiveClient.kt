@@ -25,9 +25,13 @@ class GeminiLiveClient(
     private var settings: AppSettings,
     private val listener: GeminiLiveListener
 ) {
+    // Disabled pingInterval to prevent "SocketTimeoutException: sent ping but didn't receive pong"
+    // Gemini Live API manages its own session lifecycle and does not require client-initiated ping frames.
     private val okHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private var webSocket: WebSocket? = null
@@ -36,6 +40,10 @@ class GeminiLiveClient(
     private var accumulatedReasoning = StringBuilder()
     private var isConnected = false
     private var isConnecting = false
+    private var setupSent = false
+
+    // Queue for messages sent while connection is establishing
+    private var pendingPrompt: Pair<String, String>? = null
 
     fun updateSettings(newSettings: AppSettings) {
         val needsReconnect = settings.apiKey != newSettings.apiKey || settings.modelId != newSettings.modelId
@@ -65,7 +73,16 @@ class GeminiLiveClient(
                 isConnected = true
                 isConnecting = false
                 listener.onConnectionStatusChanged(isConnected = true, isConnecting = false)
+
+                // 1. Send Setup payload as the FIRST message over the WebSocket
                 sendSetup(webSocket)
+                setupSent = true
+
+                // 2. If a message was queued while connecting, send it now that setup is complete
+                pendingPrompt?.let { (prompt, msgId) ->
+                    sendRealtimeText(prompt, msgId)
+                    pendingPrompt = null
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -75,16 +92,25 @@ class GeminiLiveClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 isConnected = false
                 isConnecting = false
+                setupSent = false
                 listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
-                currentMessageId?.let { id ->
-                    listener.onError(id, "WebSocket Failure: ${t.localizedMessage ?: "Unknown network error"}")
-                }
+
+                val errorDesc = t.localizedMessage ?: "Network connection failure"
+                val targetId = currentMessageId ?: pendingPrompt?.second ?: ""
+                listener.onError(targetId, "WebSocket Error: $errorDesc")
+                pendingPrompt = null
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 isConnected = false
                 isConnecting = false
+                setupSent = false
                 listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
+
+                if (code != 1000) {
+                    val targetId = currentMessageId ?: ""
+                    listener.onError(targetId, "Connection closed ($code): $reason")
+                }
             }
         })
     }
@@ -144,17 +170,30 @@ class GeminiLiveClient(
 
         listener.onAiMessageStart(messageId)
 
-        if (!isConnected) {
+        if (!isConnected || !setupSent || webSocket == null) {
+            // Queue message and connect first
+            pendingPrompt = Pair(prompt, messageId)
             connect()
+        } else {
+            // Already connected and setup sent, dispatch immediately
+            sendRealtimeText(prompt, messageId)
         }
+    }
 
+    private fun sendRealtimeText(prompt: String, messageId: String) {
         try {
             val inputObj = JSONObject().apply {
                 put("realtimeInput", JSONObject().apply {
                     put("text", prompt)
                 })
             }
-            webSocket?.send(inputObj.toString())
+            val sent = webSocket?.send(inputObj.toString()) ?: false
+            if (!sent) {
+                // Connection might be stale, retry with fresh connection
+                pendingPrompt = Pair(prompt, messageId)
+                disconnect()
+                connect()
+            }
         } catch (e: Exception) {
             listener.onError(messageId, "Failed to send message: ${e.localizedMessage}")
         }
@@ -165,6 +204,14 @@ class GeminiLiveClient(
 
         try {
             val root = JSONObject(jsonText)
+
+            // Handle GoAway control message (session expiring or terminating)
+            if (root.has("goAway")) {
+                // Mark for fresh connection on next request
+                isConnected = false
+                setupSent = false
+                return
+            }
 
             if (root.has("error")) {
                 val errObj = root.getJSONObject("error")
@@ -232,6 +279,8 @@ class GeminiLiveClient(
         webSocket = null
         isConnected = false
         isConnecting = false
+        setupSent = false
+        currentMessageId = null
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = false)
     }
 }
