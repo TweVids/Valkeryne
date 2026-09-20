@@ -91,19 +91,35 @@ class GeminiLiveClient(
 
     private fun sendSetup(ws: WebSocket) {
         try {
+            val isExtendedThinking = settings.modelId == "gemini-3.8-live-extended-thinking"
+            val isGemini25 = settings.modelId == "gemini-2.5-flash-native-audio-preview-12-2025"
+
+            val generationConfig = JSONObject().apply {
+                put("responseModalities", JSONArray().apply { put("AUDIO") })
+                put("speechConfig", JSONObject().apply {
+                    put("voiceConfig", JSONObject().apply {
+                        put("prebuiltVoiceConfig", JSONObject().apply {
+                            put("voiceName", settings.voiceName)
+                        })
+                    })
+                })
+                // Thinking configuration: REQUIRED for extended-thinking, MUST be omitted for gemini-3.8-live
+                if (isExtendedThinking) {
+                    put("thinkingConfig", JSONObject().apply {
+                        put("thinkingLevel", "low")
+                        put("includeThoughts", true)
+                    })
+                }
+                // Token limit specific to Gemini 2.5 Flash Native Audio Preview
+                if (isGemini25) {
+                    put("maxOutputTokens", 8192)
+                }
+            }
+
             val setupObj = JSONObject().apply {
                 put("setup", JSONObject().apply {
                     put("model", "models/${settings.modelId}")
-                    put("generationConfig", JSONObject().apply {
-                        put("responseModalities", JSONArray().apply { put("AUDIO") })
-                        put("speechConfig", JSONObject().apply {
-                            put("voiceConfig", JSONObject().apply {
-                                put("prebuiltVoiceConfig", JSONObject().apply {
-                                    put("voiceName", settings.voiceName)
-                                })
-                            })
-                        })
-                    })
+                    put("generationConfig", generationConfig)
                     put("systemInstruction", JSONObject().apply {
                         put("parts", JSONArray().apply {
                             put(JSONObject().apply {
