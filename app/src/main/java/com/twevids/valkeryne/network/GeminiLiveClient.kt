@@ -184,6 +184,71 @@ class GeminiLiveClient(
         }
     }
 
+    fun startVoiceTurn(messageId: String) {
+        currentMessageId = messageId
+        accumulatedText.clear()
+        accumulatedReasoning.clear()
+        listener.onAiMessageStart(messageId)
+
+        if (!isConnected && !isConnecting) {
+            connect()
+        }
+    }
+
+    fun sendRealtimeAudio(pcmBytes: ByteArray) {
+        if (!isConnected || webSocket == null) return
+        try {
+            val base64Pcm = Base64.encodeToString(pcmBytes, Base64.NO_WRAP)
+            val audioObj = JSONObject().apply {
+                put("realtimeInput", JSONObject().apply {
+                    put("mediaChunks", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("mimeType", "audio/pcm;rate=16000")
+                            put("data", base64Pcm)
+                        })
+                    })
+                })
+            }
+            webSocket?.send(audioObj.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun sendRealtimeImage(imageBytes: ByteArray) {
+        if (!isConnected || webSocket == null) return
+        try {
+            val base64Img = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+            val imgObj = JSONObject().apply {
+                put("realtimeInput", JSONObject().apply {
+                    put("mediaChunks", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", base64Img)
+                        })
+                    })
+                })
+            }
+            webSocket?.send(imgObj.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun finishVoiceTurn() {
+        if (!isConnected || webSocket == null) return
+        try {
+            val finishObj = JSONObject().apply {
+                put("clientContent", JSONObject().apply {
+                    put("turnComplete", true)
+                })
+            }
+            webSocket?.send(finishObj.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun sendMessage(prompt: String, messageId: String, imageBytes: ByteArray? = null) {
         currentMessageId = messageId
         accumulatedText.clear()
