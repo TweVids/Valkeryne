@@ -12,6 +12,8 @@ import com.twevids.valkeryne.model.ChatMessage
 import com.twevids.valkeryne.model.MessageSender
 import com.twevids.valkeryne.network.GeminiLiveClient
 import com.twevids.valkeryne.network.GeminiLiveListener
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
