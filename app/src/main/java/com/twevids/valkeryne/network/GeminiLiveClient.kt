@@ -182,7 +182,7 @@ class GeminiLiveClient(
 
     private fun sendSetup(ws: WebSocket) {
         try {
-            val isExtendedThinking = settings.modelId == "gemini-3.8-live-extended-thinking"
+            val supportsReasoning = com.twevids.valkeryne.model.LiveModels.ALL.find { it.id == settings.modelId }?.supportsReasoning == true
             val isGemini25 = settings.modelId == "gemini-2.5-flash-native-audio-preview-12-2025"
 
             val generationConfig = JSONObject().apply {
@@ -194,7 +194,7 @@ class GeminiLiveClient(
                         })
                     })
                 })
-                if (isExtendedThinking) {
+                if (supportsReasoning) {
                     put("thinkingConfig", JSONObject().apply {
                         put("thinkingLevel", "low")
                         put("includeThoughts", true)

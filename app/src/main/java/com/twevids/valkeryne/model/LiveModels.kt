@@ -23,12 +23,14 @@ object LiveModels {
         LiveModelInfo(
             id = "gemini-3.1-flash-live-preview",
             name = "Gemini 3.1 Flash Live Preview",
-            description = "Low-latency live preview for real-time conversational dialogue."
+            description = "Low-latency live preview for real-time conversational dialogue.",
+            supportsReasoning = true
         ),
         LiveModelInfo(
             id = "gemini-2.5-flash-native-audio-preview-12-2025",
             name = "Gemini 2.5 Flash Native Audio Preview",
-            description = "Native audio model with continuous voice streaming."
+            description = "Native audio model with continuous voice streaming.",
+            supportsReasoning = true
         )
     )
 
