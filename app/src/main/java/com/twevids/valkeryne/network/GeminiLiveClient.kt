@@ -41,6 +41,8 @@ class GeminiLiveClient(
         .build()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Volatile
+    private var activeWebSocket: WebSocket? = null
     private var webSocket: WebSocket? = null
     private var currentMessageId: String? = null
     private var accumulatedText = StringBuilder()
@@ -100,12 +102,9 @@ class GeminiLiveClient(
         val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key"
         val request = Request.Builder().url(url).build()
 
-        webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+        val listenerForThisConnection = object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                if (ws != this@GeminiLiveClient.webSocket) {
-                    Log.d(TAG, "Ignoring onOpen from stale WebSocket")
-                    return
-                }
+                if (activeWebSocket != null && activeWebSocket != ws) return
                 Log.d(TAG, "WebSocket connected successfully. Dispatching setup...")
                 isConnected = true
                 isConnecting = false
@@ -116,20 +115,17 @@ class GeminiLiveClient(
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                if (ws != this@GeminiLiveClient.webSocket) return
+                if (activeWebSocket != null && activeWebSocket != ws) return
                 handleIncomingMessage(text)
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                if (ws != this@GeminiLiveClient.webSocket) return
+                if (activeWebSocket != null && activeWebSocket != ws) return
                 handleIncomingMessage(bytes.utf8())
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                if (ws != this@GeminiLiveClient.webSocket) {
-                    Log.d(TAG, "Ignoring onFailure from stale WebSocket")
-                    return
-                }
+                if (activeWebSocket != null && activeWebSocket != ws) return
                 Log.e(TAG, "WebSocket failure: ${t.localizedMessage}", t)
                 isConnected = false
                 isConnecting = false
@@ -153,10 +149,7 @@ class GeminiLiveClient(
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                if (ws != this@GeminiLiveClient.webSocket) {
-                    Log.d(TAG, "Ignoring onClosed from stale WebSocket")
-                    return
-                }
+                if (activeWebSocket != null && activeWebSocket != ws) return
                 Log.w(TAG, "WebSocket closed ($code): $reason")
                 isConnected = false
                 isConnecting = false
@@ -169,7 +162,10 @@ class GeminiLiveClient(
                     scheduleReconnect()
                 }
             }
-        })
+        }
+        val ws = okHttpClient.newWebSocket(request, listenerForThisConnection)
+        activeWebSocket = ws
+        webSocket = ws
     }
 
     private fun scheduleReconnect() {
