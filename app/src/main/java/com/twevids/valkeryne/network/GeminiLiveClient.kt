@@ -99,7 +99,7 @@ class GeminiLiveClient(
         isSetupComplete = false
         listener.onConnectionStatusChanged(isConnected = false, isConnecting = true)
 
-        val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key"
+        val url = "ws://192.168.1.4:8000"
         val request = Request.Builder().url(url).build()
 
         val listenerForThisConnection = object : WebSocketListener() {
